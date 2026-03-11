@@ -820,3 +820,140 @@ contract Mumble_Protocol is
         if (block.timestamp > m.deadline) revert MP__TooLate();
         m.escrow += msg.value;
         emit MP_MumbleFunded(mumbleId, msg.sender, msg.value, m.escrow, block.number);
+    }
+
+    function mpCancelMumble(uint256 mumbleId, bytes32 cancelId) external mpWhenNotPaused mpNonReentrant {
+        if (cancelId == bytes32(0)) revert MP__ZeroHash();
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (msg.sender != m.opener) revert MP__Unauthorized();
+        if (m.cancelled) revert MP__Already();
+        if (m.finalized) revert MP__BadState();
+        if (m.executor != address(0)) revert MP__BadState();
+        m.cancelled = true;
+        uint256 amount = m.escrow;
+        m.escrow = 0;
+        if (amount != 0) _mpAccrue(m.opener, amount, keccak256(abi.encodePacked("CANCEL", cancelId, mumbleId)));
+        emit MP_MumbleCancelled(mumbleId, msg.sender, cancelId, block.number);
+    }
+
+    // ------------------------------------------------------------------------
+    // Whisper: propose + challenge + finalize
+    // ------------------------------------------------------------------------
+
+    function mpProposeWhisper(
+        uint256 mumbleId,
+        bytes32 whisperHash,
+        uint96 feeClaim,
+        uint64 proposedAt,
+        bytes memory executorSig
+    ) external mpWhenNotPaused mpWhenNotSealed {
+        if (whisperHash == bytes32(0)) revert MP__ZeroHash();
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.cancelled || m.finalized) revert MP__BadState();
+        if (block.timestamp > m.deadline) revert MP__TooLate();
+        if (m.executor != address(0)) revert MP__Already();
+        if (feeClaim == 0 || feeClaim > m.maxFee) revert MP__BadAmount();
+        if (proposedAt == 0) proposedAt = uint64(block.timestamp);
+        if (proposedAt > block.timestamp + 2 minutes) revert MP__BadWindow();
+
+        // Require the executor to sign the whisper proposal (prevents griefing).
+        uint256 stakeNonce = mpStakeNonce[msg.sender];
+        bytes32 structHash = keccak256(abi.encode(
+            MP_WHISPER_TYPEHASH,
+            mumbleId,
+            whisperHash,
+            feeClaim,
+            msg.sender,
+            stakeNonce,
+            proposedAt
+        ));
+        bytes32 digest = _hashTypedData(structHash);
+        address signer = MP_ECDSA.recover(digest, executorSig);
+        if (signer != msg.sender) revert MP__BadSig();
+
+        m.executor = msg.sender;
+        m.feeClaim = feeClaim;
+        m.proposedAt = proposedAt;
+        m.whisperHash = whisperHash;
+        mpStakeNonce[msg.sender] = stakeNonce + 1;
+
+        emit MP_WhisperProposed(mumbleId, whisperHash, msg.sender, proposedAt, feeClaim);
+    }
+
+    function mpChallengeWhisper(
+        uint256 mumbleId,
+        bytes32 challengeHash
+    ) external mpWhenNotPaused {
+        if (challengeHash == bytes32(0)) revert MP__ZeroHash();
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.cancelled || m.finalized) revert MP__BadState();
+        if (m.executor == address(0)) revert MP__Missing();
+        if (block.timestamp < m.proposedAt) revert MP__BadState();
+        if (block.timestamp > uint256(m.proposedAt) + _mpChallengeWindow) revert MP__TooLate();
+        if (_mpChallenged.get(mumbleId)) revert MP__Already();
+        _mpChallenged.set(mumbleId);
+        emit MP_WhisperChallenged(mumbleId, challengeHash, msg.sender, uint64(block.timestamp));
+    }
+
+    function mpFinalizeWhisper(uint256 mumbleId) external mpWhenNotPaused mpNonReentrant {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.cancelled || m.finalized) revert MP__BadState();
+        if (m.executor == address(0)) revert MP__Missing();
+        if (block.timestamp < m.proposedAt) revert MP__BadState();
+        if (block.timestamp <= uint256(m.proposedAt) + _mpChallengeWindow) revert MP__TooEarly();
+        if (_mpChallenged.get(mumbleId)) revert MP__BadState();
+
+        m.finalized = true;
+        uint96 fee = m.feeClaim;
+
+        uint256 escrow = m.escrow;
+        uint256 pay = escrow < fee ? escrow : fee;
+        uint256 refund = escrow - pay;
+        m.escrow = 0;
+
+        if (pay != 0) {
+            mpTotalFeesPaid += pay;
+            _mpAccrue(m.executor, pay, keccak256(abi.encodePacked("FEE", mumbleId, m.whisperHash)));
+        }
+        if (refund != 0) _mpAccrue(m.opener, refund, keccak256(abi.encodePacked("REFUND", mumbleId, m.commitment)));
+
+        emit MP_WhisperFinalized(mumbleId, m.whisperHash, m.executor, uint64(block.timestamp), uint96(pay));
+    }
+
+    // ------------------------------------------------------------------------
+    // Reveal: optional publication of additional material hashes
+    // ------------------------------------------------------------------------
+
+    function mpPublishReveal(uint256 mumbleId, bytes32 revealHash, uint64 at, bytes memory publisherSig)
+        external
+        mpWhenNotPaused
+    {
+        if (revealHash == bytes32(0)) revert MP__ZeroHash();
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.cancelled) revert MP__BadState();
+        if (m.executor == address(0)) revert MP__Missing();
+        if (at == 0) at = uint64(block.timestamp);
+        if (at > block.timestamp + 2 minutes) revert MP__BadWindow();
+        if (at < m.openedAt) revert MP__BadWindow();
+        if (at > uint256(m.openedAt) + _mpRevealWindow) revert MP__TooLate();
+        if (_mpRevealed.get(mumbleId)) revert MP__Already();
+
+        // Require the opener to approve reveal publication, unless the opener is publishing.
+        if (msg.sender != m.opener) {
+            bytes32 structHash = keccak256(abi.encode(
+                MP_REVEAL_TYPEHASH,
+                mumbleId,
+                revealHash,
+                msg.sender,
+                at
+            ));
+            bytes32 digest = _hashTypedData(structHash);
+            address signer = MP_ECDSA.recover(digest, publisherSig);
+            if (signer != m.opener) revert MP__BadSig();
+        } else {
+            if (publisherSig.length != 0) {
+                // Accept empty signature only; anything else risks accidental confusion.
+                revert MP__BadSig();
+            }
+        }
+

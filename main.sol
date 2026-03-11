@@ -272,3 +272,140 @@ abstract contract MP_Owned2Step {
         mpOwner = o;
         emit MP_OwnerTransferFinished(address(0), o, block.number);
     }
+
+    function mpTransferOwnership(address nextOwner) external mpOnlyOwner {
+        if (nextOwner == address(0)) revert MP__BadAddress();
+        mpPendingOwner = nextOwner;
+        emit MP_OwnerTransferStarted(mpOwner, nextOwner, block.number);
+    }
+
+    function mpAcceptOwnership() external {
+        address pending = mpPendingOwner;
+        if (msg.sender != pending) revert MP__Unauthorized();
+        address prev = mpOwner;
+        mpOwner = pending;
+        mpPendingOwner = address(0);
+        emit MP_OwnerTransferFinished(prev, pending, block.number);
+    }
+}
+
+// ============================================================================
+//  INTERNAL: Pull payments
+// ============================================================================
+
+abstract contract MP_PullPayments is MP_Reentrancy {
+    mapping(address => uint256) internal _mpCredit;
+    event MP_Credit(address indexed to, uint256 amount, bytes32 indexed reason, uint256 atBlock);
+    event MP_Withdrawn(address indexed to, uint256 amount, uint256 atBlock);
+
+    function mpCreditOf(address who) external view returns (uint256) {
+        return _mpCredit[who];
+    }
+
+    function _mpAccrue(address to, uint256 amount, bytes32 reason) internal {
+        if (to == address(0)) revert MP__BadAddress();
+        if (amount == 0) return;
+        _mpCredit[to] += amount;
+        emit MP_Credit(to, amount, reason, block.number);
+    }
+
+    function mpWithdrawCredit(uint256 amount) external mpNonReentrant {
+        uint256 bal = _mpCredit[msg.sender];
+        if (amount == 0 || amount > bal) revert MP__BadAmount();
+        _mpCredit[msg.sender] = bal - amount;
+        (bool ok,) = payable(msg.sender).call{value: amount}("");
+        if (!ok) revert MP__TransferFailed();
+        emit MP_Withdrawn(msg.sender, amount, block.number);
+    }
+}
+
+// ============================================================================
+//  EIP-712 base
+// ============================================================================
+
+abstract contract MP_EIP712Domain {
+    bytes32 internal immutable _MP_DOMAIN_SEPARATOR;
+    uint256 internal immutable _MP_CACHED_CHAIN_ID;
+    bytes32 internal immutable _MP_NAME_HASH;
+    bytes32 internal immutable _MP_VERSION_HASH;
+
+    bytes32 internal constant _MP_EIP712_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+
+    constructor(string memory name, string memory version) {
+        _MP_NAME_HASH = keccak256(bytes(name));
+        _MP_VERSION_HASH = keccak256(bytes(version));
+        _MP_CACHED_CHAIN_ID = block.chainid;
+        _MP_DOMAIN_SEPARATOR = _buildDomainSeparator(_MP_EIP712_DOMAIN_TYPEHASH, _MP_NAME_HASH, _MP_VERSION_HASH);
+    }
+
+    function _buildDomainSeparator(bytes32 typeHash, bytes32 nameHash, bytes32 versionHash) private view returns (bytes32) {
+        return keccak256(abi.encode(typeHash, nameHash, versionHash, block.chainid, address(this)));
+    }
+
+    function mpDomainSeparator() public view returns (bytes32) {
+        if (block.chainid == _MP_CACHED_CHAIN_ID) return _MP_DOMAIN_SEPARATOR;
+        return _buildDomainSeparator(_MP_EIP712_DOMAIN_TYPEHASH, _MP_NAME_HASH, _MP_VERSION_HASH);
+    }
+
+    function _hashTypedData(bytes32 structHash) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked("\x19\x01", mpDomainSeparator(), structHash));
+    }
+}
+
+// ============================================================================
+//  INTERFACES (lean, for tooling)
+// ============================================================================
+
+interface IMP_MumbleView {
+    function mpProtocolId() external view returns (bytes32);
+    function mpRevision() external pure returns (uint256);
+    function mpSealed() external view returns (bool);
+    function mpGuardian() external view returns (address);
+    function mpFeeVault() external view returns (address);
+    function mpWindowConfig() external view returns (uint64 challengeWindow, uint64 revealWindow, uint64 escrowWindow);
+}
+
+// ============================================================================
+//  MAIN CONTRACT
+// ============================================================================
+
+contract Mumble_Protocol is
+    MP_Owned2Step,
+    MP_Pausable,
+    MP_PullPayments,
+    MP_EIP712Domain,
+    IMP_MumbleView
+{
+    using MP_SafeCast for uint256;
+    using MP_Bitmap for mapping(uint256 => uint256);
+
+    // ------------------------------------------------------------------------
+    // Events (unique and chatty)
+    // ------------------------------------------------------------------------
+
+    event MP_GuardianSet(address indexed previous, address indexed current, uint256 atBlock);
+    event MP_SealCast(address indexed by, bytes32 indexed sealId, uint256 atBlock);
+    event MP_FeeVaultSet(address indexed previous, address indexed current, uint256 atBlock);
+    event MP_WindowsSet(uint64 challengeWindow, uint64 revealWindow, uint64 escrowWindow, uint256 atBlock);
+    event MP_RateSet(uint32 perEpoch, uint32 epochSeconds, uint256 atBlock);
+
+    event MP_ExecutorStaked(address indexed executor, uint256 amount, uint256 stakeAfter, uint256 atBlock);
+    event MP_ExecutorUnstaked(address indexed executor, uint256 amount, uint256 stakeAfter, uint256 atBlock);
+    event MP_ExecutorSlashed(address indexed executor, address indexed to, uint256 amount, bytes32 indexed ticket, uint256 atBlock);
+
+    event MP_MumbleOpened(
+        uint256 indexed mumbleId,
+        address indexed opener,
+        bytes32 indexed commitment,
+        uint64 deadline,
+        uint96 maxFee,
+        uint64 openedAt,
+        bytes32 modelTag
+    );
+
+    event MP_MumbleFunded(uint256 indexed mumbleId, address indexed from, uint256 amount, uint256 newEscrow, uint256 atBlock);
+    event MP_MumbleCancelled(uint256 indexed mumbleId, address indexed by, bytes32 indexed cancelId, uint256 atBlock);
+
+    event MP_WhisperProposed(
+        uint256 indexed mumbleId,

@@ -1779,3 +1779,133 @@ contract Mumble_Protocol is
     function mpChallengeFlagsRange(uint256 fromId, uint256 toId) external view returns (bool[] memory out) {
         if (toId > _mumbles.length) toId = _mumbles.length;
         if (fromId >= toId) return new bool[](0);
+        uint256 n = toId - fromId;
+        if (n > MP_MAX_BATCH) revert MP__TooLarge();
+        out = new bool[](n);
+        for (uint256 i = 0; i < n; i++) out[i] = _mpChallenged.get(fromId + i);
+    }
+
+    function mpRevealFlagsRange(uint256 fromId, uint256 toId) external view returns (bool[] memory out) {
+        if (toId > _mumbles.length) toId = _mumbles.length;
+        if (fromId >= toId) return new bool[](0);
+        uint256 n = toId - fromId;
+        if (n > MP_MAX_BATCH) revert MP__TooLarge();
+        out = new bool[](n);
+        for (uint256 i = 0; i < n; i++) out[i] = _mpRevealed.get(fromId + i);
+    }
+
+    // ------------------------------------------------------------------------
+    // Bytes32 introspection + packing utilities
+    // ------------------------------------------------------------------------
+
+    function mpByteAt(bytes32 x, uint8 idx) external pure returns (uint8) {
+        if (idx >= 32) revert MP__Overflow();
+        return uint8(x[idx]);
+    }
+
+    function mpNibbleAt(bytes32 x, uint8 idx, bool high) external pure returns (uint8) {
+        if (idx >= 32) revert MP__Overflow();
+        uint8 b = uint8(x[idx]);
+        return high ? (b >> 4) : (b & 0x0f);
+    }
+
+    function mpXor4(bytes32 a, bytes32 b, bytes32 c, bytes32 d) external pure returns (bytes32) {
+        if (a == bytes32(0) || b == bytes32(0) || c == bytes32(0) || d == bytes32(0)) revert MP__ZeroHash();
+        return a ^ b ^ c ^ d;
+    }
+
+    function mpBlend(bytes32 a, bytes32 b, uint8 takeHighBytes) external pure returns (bytes32 out) {
+        if (takeHighBytes > 32) revert MP__Overflow();
+        bytes32 hiMask;
+        if (takeHighBytes == 0) hiMask = bytes32(0);
+        else hiMask = bytes32(type(uint256).max << ((32 - takeHighBytes) * 8));
+        out = (a & hiMask) | (b & ~hiMask);
+    }
+
+    function mpPack2(bytes32 a, bytes32 b) external pure returns (bytes32) {
+        if (a == bytes32(0) || b == bytes32(0)) revert MP__ZeroHash();
+        return keccak256(abi.encodePacked(bytes1(0x50), a, b));
+    }
+
+    function mpPack3(bytes32 a, bytes32 b, bytes32 c) external pure returns (bytes32) {
+        if (a == bytes32(0) || b == bytes32(0) || c == bytes32(0)) revert MP__ZeroHash();
+        return keccak256(abi.encodePacked(bytes1(0x51), a, b, c));
+    }
+
+    function mpPack5(bytes32 a, bytes32 b, bytes32 c, bytes32 d, bytes32 e) external pure returns (bytes32) {
+        if (a == bytes32(0) || b == bytes32(0) || c == bytes32(0) || d == bytes32(0) || e == bytes32(0)) revert MP__ZeroHash();
+        return keccak256(abi.encodePacked(bytes1(0x55), a, b, c, d, e));
+    }
+
+    function mpPack7(
+        bytes32 a,
+        bytes32 b,
+        bytes32 c,
+        bytes32 d,
+        bytes32 e,
+        bytes32 f,
+        bytes32 g
+    ) external pure returns (bytes32) {
+        if (a == bytes32(0) || b == bytes32(0) || c == bytes32(0) || d == bytes32(0) || e == bytes32(0) || f == bytes32(0) || g == bytes32(0)) {
+            revert MP__ZeroHash();
+        }
+        return keccak256(abi.encodePacked(bytes1(0x57), a, b, c, d, e, f, g));
+    }
+
+    function mpAddressFrom(bytes32 seed) external view returns (address) {
+        if (seed == bytes32(0)) revert MP__ZeroHash();
+        return address(uint160(uint256(keccak256(abi.encodePacked(
+            bytes1(0x61),
+            seed,
+            MP_RNG_SALT,
+            block.chainid,
+            address(this)
+        )))));
+    }
+
+    function mpVaultCandidate(bytes32 seed) external view returns (address) {
+        if (seed == bytes32(0)) revert MP__ZeroHash();
+        return address(uint160(uint256(keccak256(abi.encodePacked(
+            bytes1(0x76),
+            MP_PROTOCOL_ID,
+            seed,
+            msg.sender,
+            blockhash(block.number - 1)
+        )))));
+    }
+
+    // ------------------------------------------------------------------------
+    // Sanitizers (pure) to help clients detect mistakes offchain
+    // ------------------------------------------------------------------------
+
+    function mpIsZero(bytes32 x) external pure returns (bool) { return x == bytes32(0); }
+    function mpIsZeroAddr(address a) external pure returns (bool) { return a == address(0); }
+    function mpEq(bytes32 a, bytes32 b) external pure returns (bool) { return a == b; }
+    function mpEqAddr(address a, address b) external pure returns (bool) { return a == b; }
+
+    function mpBoundedFee(uint96 fee, uint96 maxFee) external pure returns (bool) {
+        return fee != 0 && fee <= maxFee;
+    }
+
+    function mpBoundedDeadline(uint64 deadline, uint64 nowTs) external pure returns (bool) {
+        return deadline > nowTs;
+    }
+
+    function mpBoundedProposedAt(uint64 proposedAt, uint64 nowTs) external pure returns (bool) {
+        if (proposedAt == 0) return false;
+        return proposedAt <= nowTs + 120;
+    }
+
+    function mpBoundedRevealAt(uint64 at, uint64 openedAt, uint64 revealWindow) external pure returns (bool) {
+        if (at < openedAt) return false;
+        return uint256(at) <= uint256(openedAt) + uint256(revealWindow);
+    }
+
+    // ------------------------------------------------------------------------
+    // Receiver
+    // ------------------------------------------------------------------------
+
+    receive() external payable {
+        emit MP_FallbackIn(msg.sender, msg.value, block.number);
+    }
+}

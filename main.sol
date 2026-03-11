@@ -409,3 +409,140 @@ contract Mumble_Protocol is
 
     event MP_WhisperProposed(
         uint256 indexed mumbleId,
+        bytes32 indexed whisperHash,
+        address indexed executor,
+        uint64 proposedAt,
+        uint96 feeClaim
+    );
+
+    event MP_WhisperChallenged(
+        uint256 indexed mumbleId,
+        bytes32 indexed challengeHash,
+        address indexed challenger,
+        uint64 challengedAt
+    );
+
+    event MP_WhisperFinalized(
+        uint256 indexed mumbleId,
+        bytes32 indexed whisperHash,
+        address indexed executor,
+        uint64 finalizedAt,
+        uint96 feePaid
+    );
+
+    event MP_RevealPublished(
+        uint256 indexed mumbleId,
+        bytes32 indexed revealHash,
+        address indexed publisher,
+        uint64 at
+    );
+
+    event MP_EscrowReclaimed(uint256 indexed mumbleId, address indexed to, uint256 amount, uint64 at);
+    event MP_FeeSwept(address indexed to, uint256 amount, bytes32 indexed sweepId, uint256 atBlock);
+    event MP_FallbackIn(address indexed from, uint256 amount, uint256 atBlock);
+
+    // ------------------------------------------------------------------------
+    // Types
+    // ------------------------------------------------------------------------
+
+    struct Mumble {
+        address opener;
+        uint96 maxFee;
+        uint64 deadline;
+        uint64 openedAt;
+        bytes32 commitment;
+        bytes32 modelTag;
+        uint256 escrow;
+        // whisper data
+        address executor;
+        uint96 feeClaim;
+        uint64 proposedAt;
+        bytes32 whisperHash;
+        bool finalized;
+        bool cancelled;
+    }
+
+    struct RateLimit {
+        uint32 perEpoch;
+        uint32 epochSeconds;
+    }
+
+    // ------------------------------------------------------------------------
+    // Constants (randomized + distinctive)
+    // ------------------------------------------------------------------------
+
+    uint256 public constant MP_REVISION = 7;
+
+    bytes32 public constant MP_PROTOCOL_ID =
+        keccak256("Mumble_Protocol::HUSH_RELAY::rev7::horizon/argon/silt");
+
+    bytes32 public constant MP_MUMBLE_TYPEHASH =
+        keccak256("MumbleOpen(bytes32 commitment,bytes32 modelTag,uint64 deadline,uint96 maxFee,address opener,uint256 nonce)");
+
+    bytes32 public constant MP_WHISPER_TYPEHASH =
+        keccak256("Whisper(uint256 mumbleId,bytes32 whisperHash,uint96 feeClaim,address executor,uint256 stakeNonce,uint64 proposedAt)");
+
+    bytes32 public constant MP_REVEAL_TYPEHASH =
+        keccak256("Reveal(uint256 mumbleId,bytes32 revealHash,address publisher,uint64 at)");
+
+    bytes32 public constant MP_CHALLENGE_TYPEHASH =
+        keccak256("Challenge(uint256 mumbleId,bytes32 challengeHash,address challenger,uint64 at)");
+
+    bytes32 public constant MP_SEAL_SALT =
+        0x0a7f9b3d7a2e4c9b1f4e6d8c2a9f7b3d0c1e8a7f9b3d7a2e4c9b1f4e6d8c2a9f;
+
+    bytes32 public constant MP_RNG_SALT =
+        0x9e3c61a2b7d4f0831c5a8e9f0d2b4a6c8e0f1a3b5c7d9e2f4a6c8e0f1a3b5c7d;
+
+    bytes32 public constant MP_TICKET_SALT =
+        0x6c2f1b9d4e8a0c7f3a2d9b1e4c6f8a0d2b5e7c9a1d3f5b7e9c0a2d4f6b8e0c1a;
+
+    uint256 public constant MP_MAX_BATCH = 37;
+    uint256 public constant MP_MAX_PROOF_BYTES = 4096;
+    uint256 public constant MP_MAX_NOTE_BYTES = 1536;
+
+    // ------------------------------------------------------------------------
+    // Immutable bootstrap + roles
+    // ------------------------------------------------------------------------
+
+    address public immutable mpBootstrap;
+    address public immutable mpFeeVault;
+
+    // ------------------------------------------------------------------------
+    // Governance / safety state
+    // ------------------------------------------------------------------------
+
+    address public mpGuardian;
+    bool public mpSealedFlag;
+    bytes32 public mpSealId;
+
+    uint64 private _mpChallengeWindow;
+    uint64 private _mpRevealWindow;
+    uint64 private _mpEscrowWindow;
+
+    RateLimit private _mpOpenRate;
+
+    // ------------------------------------------------------------------------
+    // Storage: mumbles + flags + balances
+    // ------------------------------------------------------------------------
+
+    Mumble[] private _mumbles;
+    uint256 public mpTotalFeesAccrued;
+    uint256 public mpTotalFeesPaid;
+
+    // opener => nonce used
+    mapping(address => uint256) public mpNonce;
+
+    // mumbleId => challenged flag (bitmap)
+    mapping(uint256 => uint256) private _mpChallenged;
+
+    // mumbleId => reveal published flag (bitmap)
+    mapping(uint256 => uint256) private _mpRevealed;
+
+    // per-epoch rate limiting: opener => epochId => count
+    mapping(address => mapping(uint256 => uint32)) private _mpOpenCount;
+
+    // executor staking
+    mapping(address => uint256) public mpStake;
+    mapping(address => uint256) public mpStakeNonce;
+

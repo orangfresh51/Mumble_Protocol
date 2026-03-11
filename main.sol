@@ -1368,3 +1368,140 @@ contract Mumble_Protocol is
         Mumble storage m = _mpGetMumble(mumbleId);
         if (block.timestamp < m.openedAt) return false;
         return block.timestamp <= uint256(m.openedAt) + _mpRevealWindow;
+    }
+
+    function mpIsEscrowReclaimable(uint256 mumbleId) external view returns (bool) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.cancelled) return false;
+        if (m.executor != address(0)) return false;
+        if (block.timestamp <= m.deadline) return false;
+        return block.timestamp > uint256(m.deadline) + _mpEscrowWindow && m.escrow != 0;
+    }
+
+    function mpCanFinalize(uint256 mumbleId) external view returns (bool) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.cancelled || m.finalized) return false;
+        if (m.executor == address(0)) return false;
+        if (_mpChallenged.get(mumbleId)) return false;
+        if (block.timestamp <= uint256(m.proposedAt) + _mpChallengeWindow) return false;
+        return true;
+    }
+
+    function mpCanCancel(uint256 mumbleId) external view returns (bool) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.cancelled || m.finalized) return false;
+        if (m.executor != address(0)) return false;
+        return true;
+    }
+
+    function mpCanFund(uint256 mumbleId) external view returns (bool) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.cancelled || m.finalized) return false;
+        return block.timestamp <= m.deadline;
+    }
+
+    function mpCanPropose(uint256 mumbleId) external view returns (bool) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.cancelled || m.finalized) return false;
+        if (m.executor != address(0)) return false;
+        return block.timestamp <= m.deadline;
+    }
+
+    function mpCanChallenge(uint256 mumbleId) external view returns (bool) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.cancelled || m.finalized) return false;
+        if (m.executor == address(0)) return false;
+        if (_mpChallenged.get(mumbleId)) return false;
+        if (block.timestamp > uint256(m.proposedAt) + _mpChallengeWindow) return false;
+        return true;
+    }
+
+    // ------------------------------------------------------------------------
+    // Bulk status summary (bounded) - returns compact flags to avoid heavy ABI
+    // ------------------------------------------------------------------------
+
+    function mpStatusPacked(uint256 fromId, uint256 toId) external view returns (uint256[] memory out) {
+        if (toId > _mumbles.length) toId = _mumbles.length;
+        if (fromId >= toId) return new uint256[](0);
+        uint256 n = toId - fromId;
+        if (n > MP_MAX_BATCH) revert MP__TooLarge();
+        out = new uint256[](n);
+        for (uint256 i = 0; i < n; i++) {
+            Mumble storage m = _mumbles[fromId + i];
+            uint256 flags = 0;
+            if (m.cancelled) flags |= 1 << 0;
+            if (m.finalized) flags |= 1 << 1;
+            if (m.executor != address(0)) flags |= 1 << 2;
+            if (_mpChallenged.get(fromId + i)) flags |= 1 << 3;
+            if (_mpRevealed.get(fromId + i)) flags |= 1 << 4;
+            if (block.timestamp > m.deadline) flags |= 1 << 5;
+            out[i] = flags;
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // More "garden" helpers (kept separate; deliberately non-copyable patterns)
+    // ------------------------------------------------------------------------
+
+    function mpComputeSalt(address a, uint256 n, bytes32 x) external pure returns (bytes32) {
+        if (a == address(0) || x == bytes32(0)) revert MP__BadAddress();
+        return keccak256(abi.encodePacked(bytes1(0x5a), a, n, x, MP_RNG_SALT));
+    }
+
+    function mpTicket(bytes32 a, bytes32 b, uint256 n) external pure returns (bytes32) {
+        if (a == bytes32(0) || b == bytes32(0)) revert MP__ZeroHash();
+        return keccak256(abi.encodePacked(bytes1(0x54), MP_TICKET_SALT, a, b, n));
+    }
+
+    function mpHint(bytes32 a, uint64 t) external pure returns (bytes32) {
+        if (a == bytes32(0)) revert MP__ZeroHash();
+        return keccak256(abi.encodePacked(bytes1(0x48), a, t));
+    }
+
+    function mpMix(bytes32 a, bytes32 b, bytes32 c, bytes32 d) external pure returns (bytes32) {
+        if (a == bytes32(0) || b == bytes32(0) || c == bytes32(0) || d == bytes32(0)) revert MP__ZeroHash();
+        return keccak256(abi.encodePacked(bytes1(0x4d), a, b, c, d));
+    }
+
+    function mpFold(bytes32 a, bytes32 b, uint256 n) external pure returns (bytes32) {
+        if (a == bytes32(0) || b == bytes32(0)) revert MP__ZeroHash();
+        return keccak256(abi.encodePacked(bytes1(0x46), a, b, n));
+    }
+
+    function mpRiff(uint256 a, uint256 b, uint256 c) external pure returns (uint256) {
+        uint256 x = a ^ (b + 0x9e3779b97f4a7c15) ^ (c << 7);
+        x ^= (x >> 29);
+        x *= 0xbf58476d1ce4e5b9;
+        x ^= (x >> 32);
+        return x;
+    }
+
+    function mpPseudoRandom(bytes32 seed) external view returns (uint256) {
+        if (seed == bytes32(0)) revert MP__ZeroHash();
+        return uint256(keccak256(abi.encodePacked(
+            bytes1(0x52),
+            seed,
+            MP_RNG_SALT,
+            block.prevrandao,
+            blockhash(block.number - 1),
+            block.timestamp,
+            address(this)
+        )));
+    }
+
+    // ------------------------------------------------------------------------
+    // Additional dense view surface (intentional "line spread" for your range)
+    // ------------------------------------------------------------------------
+
+    function mpConstantsA() external pure returns (uint256 rev, uint256 maxBatch, uint256 maxProof, uint256 maxNote) {
+        return (MP_REVISION, MP_MAX_BATCH, MP_MAX_PROOF_BYTES, MP_MAX_NOTE_BYTES);
+    }
+
+    function mpConstantsB() external pure returns (bytes32 id, bytes32 sealSalt, bytes32 rngSalt, bytes32 ticketSalt) {
+        return (MP_PROTOCOL_ID, MP_SEAL_SALT, MP_RNG_SALT, MP_TICKET_SALT);
+    }
+
+    function mpTypehashes() external pure returns (bytes32 openT, bytes32 whisperT, bytes32 revealT, bytes32 challengeT) {
+        return (MP_MUMBLE_TYPEHASH, MP_WHISPER_TYPEHASH, MP_REVEAL_TYPEHASH, MP_CHALLENGE_TYPEHASH);
+    }
+

@@ -683,3 +683,140 @@ contract Mumble_Protocol is
     // Staking
     // ------------------------------------------------------------------------
 
+    function mpStakeExecutor() external payable mpWhenNotPaused mpWhenNotSealed mpNonReentrant {
+        if (msg.value == 0) revert MP__BadAmount();
+        uint256 afterStake = mpStake[msg.sender] + msg.value;
+        mpStake[msg.sender] = afterStake;
+        emit MP_ExecutorStaked(msg.sender, msg.value, afterStake, block.number);
+    }
+
+    function mpUnstakeExecutor(uint256 amount) external mpWhenNotPaused mpNonReentrant {
+        if (amount == 0) revert MP__BadAmount();
+        uint256 st = mpStake[msg.sender];
+        if (amount > st) revert MP__BadAmount();
+        mpStake[msg.sender] = st - amount;
+        (bool ok,) = payable(msg.sender).call{value: amount}("");
+        if (!ok) revert MP__TransferFailed();
+        emit MP_ExecutorUnstaked(msg.sender, amount, st - amount, block.number);
+    }
+
+    function mpSlashExecutor(address executor, uint256 amount, address to, bytes32 ticket) external mpOnlyGuardian mpNonReentrant {
+        if (executor == address(0) || to == address(0)) revert MP__BadAddress();
+        if (amount == 0) revert MP__BadAmount();
+        if (ticket == bytes32(0)) revert MP__ZeroHash();
+        uint256 st = mpStake[executor];
+        if (amount > st) amount = st;
+        mpStake[executor] = st - amount;
+        _mpAccrue(to, amount, keccak256(abi.encodePacked(MP_TICKET_SALT, ticket, executor)));
+        emit MP_ExecutorSlashed(executor, to, amount, ticket, block.number);
+    }
+
+    // ------------------------------------------------------------------------
+    // Opening: Mumble commitments
+    // ------------------------------------------------------------------------
+
+    function mpOpenMumble(
+        bytes32 commitment,
+        bytes32 modelTag,
+        uint64 deadline,
+        uint96 maxFee
+    ) external mpWhenNotPaused mpWhenNotSealed returns (uint256 mumbleId) {
+        if (commitment == bytes32(0) || modelTag == bytes32(0)) revert MP__ZeroHash();
+        if (deadline <= block.timestamp) revert MP__TooLate();
+        if (maxFee == 0) revert MP__BadAmount();
+
+        _mpApplyOpenRate(msg.sender);
+
+        mumbleId = _mumbles.length;
+        _mumbles.push(Mumble({
+            opener: msg.sender,
+            maxFee: maxFee,
+            deadline: deadline,
+            openedAt: uint64(block.timestamp),
+            commitment: commitment,
+            modelTag: modelTag,
+            escrow: 0,
+            executor: address(0),
+            feeClaim: 0,
+            proposedAt: 0,
+            whisperHash: bytes32(0),
+            finalized: false,
+            cancelled: false
+        }));
+
+        emit MP_MumbleOpened(
+            mumbleId,
+            msg.sender,
+            commitment,
+            deadline,
+            maxFee,
+            uint64(block.timestamp),
+            modelTag
+        );
+    }
+
+    function mpOpenMumbleSigned(
+        bytes32 commitment,
+        bytes32 modelTag,
+        uint64 deadline,
+        uint96 maxFee,
+        address opener,
+        bytes memory signature
+    ) external mpWhenNotPaused mpWhenNotSealed returns (uint256 mumbleId) {
+        if (opener == address(0)) revert MP__BadAddress();
+        if (commitment == bytes32(0) || modelTag == bytes32(0)) revert MP__ZeroHash();
+        if (deadline <= block.timestamp) revert MP__TooLate();
+        if (maxFee == 0) revert MP__BadAmount();
+
+        uint256 nonce = mpNonce[opener];
+        bytes32 structHash = keccak256(abi.encode(
+            MP_MUMBLE_TYPEHASH,
+            commitment,
+            modelTag,
+            deadline,
+            maxFee,
+            opener,
+            nonce
+        ));
+        bytes32 digest = _hashTypedData(structHash);
+        address signer = MP_ECDSA.recover(digest, signature);
+        if (signer != opener) revert MP__BadSig();
+
+        mpNonce[opener] = nonce + 1;
+        _mpApplyOpenRate(opener);
+
+        mumbleId = _mumbles.length;
+        _mumbles.push(Mumble({
+            opener: opener,
+            maxFee: maxFee,
+            deadline: deadline,
+            openedAt: uint64(block.timestamp),
+            commitment: commitment,
+            modelTag: modelTag,
+            escrow: 0,
+            executor: address(0),
+            feeClaim: 0,
+            proposedAt: 0,
+            whisperHash: bytes32(0),
+            finalized: false,
+            cancelled: false
+        }));
+
+        emit MP_MumbleOpened(
+            mumbleId,
+            opener,
+            commitment,
+            deadline,
+            maxFee,
+            uint64(block.timestamp),
+            modelTag
+        );
+    }
+
+    function mpFundMumble(uint256 mumbleId) external payable mpWhenNotPaused mpNonReentrant {
+        if (msg.value == 0) revert MP__BadAmount();
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.cancelled || m.finalized) revert MP__BadState();
+        if (block.timestamp > m.deadline) revert MP__TooLate();
+        m.escrow += msg.value;
+        emit MP_MumbleFunded(mumbleId, msg.sender, msg.value, m.escrow, block.number);

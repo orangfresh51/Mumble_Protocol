@@ -135,3 +135,140 @@ library MP_SafeCast {
         if (x > type(uint32).max) revert MP__Overflow();
         return uint32(x);
     }
+
+    function toUint16(uint256 x) internal pure returns (uint16) {
+        if (x > type(uint16).max) revert MP__Overflow();
+        return uint16(x);
+    }
+
+    function toUint8(uint256 x) internal pure returns (uint8) {
+        if (x > type(uint8).max) revert MP__Overflow();
+        return uint8(x);
+    }
+}
+
+// ============================================================================
+//  LIB: Merkle proof (single-leaf), with explicit hashing domain separation
+// ============================================================================
+
+library MP_Merkle {
+    function verify(bytes32 root, bytes32 leaf, bytes32[] memory proof, uint256 index) internal pure returns (bool ok) {
+        bytes32 computed = leaf;
+        uint256 idx = index;
+        for (uint256 i = 0; i < proof.length; i++) {
+            bytes32 p = proof[i];
+            if ((idx & 1) == 1) computed = keccak256(abi.encodePacked(bytes1(0x01), p, computed));
+            else computed = keccak256(abi.encodePacked(bytes1(0x01), computed, p));
+            idx >>= 1;
+        }
+        return computed == root;
+    }
+}
+
+// ============================================================================
+//  LIB: ECDSA recover (no malleable signatures)
+// ============================================================================
+
+library MP_ECDSA {
+    function recover(bytes32 digest, bytes memory signature) internal pure returns (address signer) {
+        if (signature.length != 65) revert MP__BadSig();
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := mload(add(signature, 0x20))
+            s := mload(add(signature, 0x40))
+            v := byte(0, mload(add(signature, 0x60)))
+        }
+        if (v < 27) v += 27;
+        if (v != 27 && v != 28) revert MP__BadSig();
+        // Enforce lower-s malleability per EIP-2
+        if (uint256(s) > 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0) revert MP__BadSig();
+        signer = ecrecover(digest, v, r, s);
+        if (signer == address(0)) revert MP__BadSig();
+    }
+}
+
+// ============================================================================
+//  LIB: Bitmaps for sparse flags
+// ============================================================================
+
+library MP_Bitmap {
+    function get(mapping(uint256 => uint256) storage bm, uint256 index) internal view returns (bool) {
+        uint256 bucket = index >> 8;
+        uint256 mask = 1 << (index & 0xff);
+        return (bm[bucket] & mask) != 0;
+    }
+
+    function set(mapping(uint256 => uint256) storage bm, uint256 index) internal {
+        uint256 bucket = index >> 8;
+        uint256 mask = 1 << (index & 0xff);
+        bm[bucket] |= mask;
+    }
+
+    function clear(mapping(uint256 => uint256) storage bm, uint256 index) internal {
+        uint256 bucket = index >> 8;
+        uint256 mask = 1 << (index & 0xff);
+        bm[bucket] &= ~mask;
+    }
+}
+
+// ============================================================================
+//  INTERNAL: NonReentrant
+// ============================================================================
+
+abstract contract MP_Reentrancy {
+    uint256 private _mpLock;
+
+    modifier mpNonReentrant() {
+        if (_mpLock != 0) revert MP__Reentrancy();
+        _mpLock = 1;
+        _;
+        _mpLock = 0;
+    }
+
+    function _mpLocked() internal view returns (bool) {
+        return _mpLock != 0;
+    }
+}
+
+// ============================================================================
+//  INTERNAL: Pausable
+// ============================================================================
+
+abstract contract MP_Pausable {
+    event MP_PauseFlipped(bool paused, address indexed by, uint256 atBlock);
+    bool public mpPaused;
+
+    modifier mpWhenNotPaused() {
+        if (mpPaused) revert MP__Paused();
+        _;
+    }
+
+    function _mpSetPaused(bool v) internal {
+        mpPaused = v;
+        emit MP_PauseFlipped(v, msg.sender, block.number);
+    }
+}
+
+// ============================================================================
+//  INTERNAL: Two-step ownership
+// ============================================================================
+
+abstract contract MP_Owned2Step {
+    event MP_OwnerTransferStarted(address indexed previousOwner, address indexed nextOwner, uint256 atBlock);
+    event MP_OwnerTransferFinished(address indexed previousOwner, address indexed newOwner, uint256 atBlock);
+
+    address public mpOwner;
+    address public mpPendingOwner;
+
+    modifier mpOnlyOwner() {
+        if (msg.sender != mpOwner) revert MP__NotOwner();
+        _;
+    }
+
+    function _mpInitOwner(address o) internal {
+        if (o == address(0)) revert MP__BadAddress();
+        mpOwner = o;
+        emit MP_OwnerTransferFinished(address(0), o, block.number);
+    }

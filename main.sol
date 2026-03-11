@@ -1505,3 +1505,140 @@ contract Mumble_Protocol is
         return (MP_MUMBLE_TYPEHASH, MP_WHISPER_TYPEHASH, MP_REVEAL_TYPEHASH, MP_CHALLENGE_TYPEHASH);
     }
 
+    function mpRoleSnapshot() external view returns (address owner_, address pending_, address guardian_, address bootstrap_, address vault_) {
+        return (mpOwner, mpPendingOwner, mpGuardian, mpBootstrap, mpFeeVault);
+    }
+
+    function mpSealing() external view returns (bool sealed_, bytes32 sealId_) {
+        return (mpSealedFlag, mpSealId);
+    }
+
+    function mpWindowsSnapshot() external view returns (uint64 c, uint64 r, uint64 e) {
+        return (_mpChallengeWindow, _mpRevealWindow, _mpEscrowWindow);
+    }
+
+    function mpOpenRateSnapshot() external view returns (uint32 perEpoch, uint32 epochSeconds, uint256 epochIdNow) {
+        RateLimit memory rr = _mpOpenRate;
+        return (rr.perEpoch, rr.epochSeconds, uint256(block.timestamp) / uint256(rr.epochSeconds));
+    }
+
+    function mpMumbleCore(uint256 mumbleId) external view returns (
+        address opener,
+        uint96 maxFee,
+        uint64 deadline,
+        uint64 openedAt,
+        bytes32 commitment,
+        bytes32 modelTag
+    ) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        return (m.opener, m.maxFee, m.deadline, m.openedAt, m.commitment, m.modelTag);
+    }
+
+    function mpMumbleProgress(uint256 mumbleId) external view returns (
+        uint256 escrow,
+        address executor,
+        uint96 feeClaim,
+        uint64 proposedAt,
+        bytes32 whisperHash,
+        bool finalized,
+        bool cancelled,
+        bool challenged,
+        bool revealed
+    ) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        escrow = m.escrow;
+        executor = m.executor;
+        feeClaim = m.feeClaim;
+        proposedAt = m.proposedAt;
+        whisperHash = m.whisperHash;
+        finalized = m.finalized;
+        cancelled = m.cancelled;
+        challenged = _mpChallenged.get(mumbleId);
+        revealed = _mpRevealed.get(mumbleId);
+    }
+
+    function mpTimeNow() external view returns (uint64 ts, uint64 bn) {
+        ts = uint64(block.timestamp);
+        bn = uint64(block.number);
+    }
+
+    function mpBalance() external view returns (uint256) { return address(this).balance; }
+
+    function mpStakeOf(address executor) external view returns (uint256) { return mpStake[executor]; }
+    function mpStakeNonceOf(address executor) external view returns (uint256) { return mpStakeNonce[executor]; }
+
+    function mpIsExecutor(address a) external view returns (bool) { return mpStake[a] != 0; }
+
+    function mpGetWindowEnds(uint256 mumbleId) external view returns (uint64 challengeEnds, uint64 revealEnds, uint64 escrowReclaimAfter) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.executor != address(0)) {
+            challengeEnds = uint64(uint256(m.proposedAt) + _mpChallengeWindow);
+        } else {
+            challengeEnds = 0;
+        }
+        revealEnds = uint64(uint256(m.openedAt) + _mpRevealWindow);
+        escrowReclaimAfter = uint64(uint256(m.deadline) + _mpEscrowWindow);
+    }
+
+    function mpGetOpenDigestFor(address opener, bytes32 commitment, bytes32 modelTag, uint64 deadline, uint96 maxFee)
+        external
+        view
+        returns (bytes32 digest, uint256 nonce)
+    {
+        nonce = mpNonce[opener];
+        bytes32 structHash = keccak256(abi.encode(MP_MUMBLE_TYPEHASH, commitment, modelTag, deadline, maxFee, opener, nonce));
+        digest = _hashTypedData(structHash);
+    }
+
+    // ------------------------------------------------------------------------
+    // Compatibility helpers (explicit names, but different from your other files)
+    // ------------------------------------------------------------------------
+
+    function protocolId() external pure returns (bytes32) { return MP_PROTOCOL_ID; }
+    function revision() external pure returns (uint256) { return MP_REVISION; }
+    function owner() external view returns (address) { return mpOwner; }
+    function guardian() external view returns (address) { return mpGuardian; }
+    function paused() external view returns (bool) { return mpPaused; }
+    function sealed() external view returns (bool) { return mpSealedFlag; }
+    function feeVault() external view returns (address) { return mpFeeVault; }
+
+    // ------------------------------------------------------------------------
+    // Diagnostics deck (bounded + non-invasive)
+    // ------------------------------------------------------------------------
+
+    function mpMumbleFlags(uint256 mumbleId) external view returns (uint256 flags) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.cancelled) flags |= 1 << 0;
+        if (m.finalized) flags |= 1 << 1;
+        if (m.executor != address(0)) flags |= 1 << 2;
+        if (_mpChallenged.get(mumbleId)) flags |= 1 << 3;
+        if (_mpRevealed.get(mumbleId)) flags |= 1 << 4;
+        if (block.timestamp > m.deadline) flags |= 1 << 5;
+        if (m.escrow != 0) flags |= 1 << 6;
+        if (block.timestamp > uint256(m.openedAt) + _mpRevealWindow) flags |= 1 << 7;
+        if (m.executor != address(0) && block.timestamp > uint256(m.proposedAt) + _mpChallengeWindow) flags |= 1 << 8;
+    }
+
+    function mpMumbleStateCode(uint256 mumbleId) external view returns (uint8 code) {
+        // 0 = unknown, 1 = open, 2 = proposed, 3 = challenged, 4 = finalized, 5 = cancelled, 6 = expired
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.cancelled) return 5;
+        if (m.finalized) return 4;
+        if (block.timestamp > m.deadline && m.executor == address(0)) return 6;
+        if (_mpChallenged.get(mumbleId)) return 3;
+        if (m.executor != address(0)) return 2;
+        return 1;
+    }
+
+    function mpMumbleStateLabel(uint256 mumbleId) external view returns (string memory) {
+        uint8 c = this.mpMumbleStateCode(mumbleId);
+        if (c == 1) return "open";
+        if (c == 2) return "proposed";
+        if (c == 3) return "challenged";
+        if (c == 4) return "finalized";
+        if (c == 5) return "cancelled";
+        if (c == 6) return "expired";
+        return "unknown";
+    }
+
+    function mpEarliestFinalizeAt(uint256 mumbleId) external view returns (uint64) {

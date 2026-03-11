@@ -1094,3 +1094,140 @@ contract Mumble_Protocol is
     }
 
     function mpDomainBytes() external view returns (bytes32 nameHash, bytes32 versionHash, bytes32 domainSeparator) {
+        return (_MP_NAME_HASH, _MP_VERSION_HASH, mpDomainSeparator());
+    }
+
+    function mpComputeOpenDigest(
+        bytes32 commitment,
+        bytes32 modelTag,
+        uint64 deadline,
+        uint96 maxFee,
+        address opener,
+        uint256 nonce
+    ) external view returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            MP_MUMBLE_TYPEHASH,
+            commitment,
+            modelTag,
+            deadline,
+            maxFee,
+            opener,
+            nonce
+        ));
+        return _hashTypedData(structHash);
+    }
+
+    function mpComputeWhisperDigest(
+        uint256 mumbleId,
+        bytes32 whisperHash,
+        uint96 feeClaim,
+        address executor,
+        uint256 stakeNonce,
+        uint64 proposedAt
+    ) external view returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            MP_WHISPER_TYPEHASH,
+            mumbleId,
+            whisperHash,
+            feeClaim,
+            executor,
+            stakeNonce,
+            proposedAt
+        ));
+        return _hashTypedData(structHash);
+    }
+
+    function mpComputeRevealDigest(uint256 mumbleId, bytes32 revealHash, address publisher, uint64 at)
+        external
+        view
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(abi.encode(MP_REVEAL_TYPEHASH, mumbleId, revealHash, publisher, at));
+        return _hashTypedData(structHash);
+    }
+
+    function mpComputeChallengeDigest(uint256 mumbleId, bytes32 challengeHash, address challenger, uint64 at)
+        external
+        view
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(abi.encode(MP_CHALLENGE_TYPEHASH, mumbleId, challengeHash, challenger, at));
+        return _hashTypedData(structHash);
+    }
+
+    function mpFeeVaultHex() external view returns (string memory) {
+        return MP_Strings.toHexString(mpFeeVault);
+    }
+
+    function mpOwnerHex() external view returns (string memory) {
+        return MP_Strings.toHexString(mpOwner);
+    }
+
+    function mpGuardianHex() external view returns (string memory) {
+        return MP_Strings.toHexString(mpGuardian);
+    }
+
+    function mpIsHealthy() external view returns (bool ok, bytes32 why) {
+        if (mpSealedFlag) return (false, keccak256("SEALED"));
+        if (mpPaused) return (false, keccak256("PAUSED"));
+        if (mpOwner == address(0)) return (false, keccak256("NO_OWNER"));
+        if (mpGuardian == address(0)) return (false, keccak256("NO_GUARDIAN"));
+        if (mpFeeVault == address(0)) return (false, keccak256("NO_VAULT"));
+        return (true, keccak256("OK"));
+    }
+
+    // ------------------------------------------------------------------------
+    // Batch views (bounded)
+    // ------------------------------------------------------------------------
+
+    function mpMumblesRange(uint256 fromId, uint256 toId) external view returns (Mumble[] memory out) {
+        if (toId > _mumbles.length) toId = _mumbles.length;
+        if (fromId >= toId) return new Mumble[](0);
+        uint256 n = toId - fromId;
+        if (n > MP_MAX_BATCH) revert MP__TooLarge();
+        out = new Mumble[](n);
+        for (uint256 i = 0; i < n; i++) out[i] = _mumbles[fromId + i];
+    }
+
+    function mpCommitmentsRange(uint256 fromId, uint256 toId) external view returns (bytes32[] memory out) {
+        if (toId > _mumbles.length) toId = _mumbles.length;
+        if (fromId >= toId) return new bytes32[](0);
+        uint256 n = toId - fromId;
+        if (n > MP_MAX_BATCH) revert MP__TooLarge();
+        out = new bytes32[](n);
+        for (uint256 i = 0; i < n; i++) out[i] = _mumbles[fromId + i].commitment;
+    }
+
+    function mpWhispersRange(uint256 fromId, uint256 toId) external view returns (bytes32[] memory out) {
+        if (toId > _mumbles.length) toId = _mumbles.length;
+        if (fromId >= toId) return new bytes32[](0);
+        uint256 n = toId - fromId;
+        if (n > MP_MAX_BATCH) revert MP__TooLarge();
+        out = new bytes32[](n);
+        for (uint256 i = 0; i < n; i++) out[i] = _mumbles[fromId + i].whisperHash;
+    }
+
+    function mpEscrowsRange(uint256 fromId, uint256 toId) external view returns (uint256[] memory out) {
+        if (toId > _mumbles.length) toId = _mumbles.length;
+        if (fromId >= toId) return new uint256[](0);
+        uint256 n = toId - fromId;
+        if (n > MP_MAX_BATCH) revert MP__TooLarge();
+        out = new uint256[](n);
+        for (uint256 i = 0; i < n; i++) out[i] = _mumbles[fromId + i].escrow;
+    }
+
+    // ------------------------------------------------------------------------
+    // Extra digest + proof utilities (privacy-forward; does not verify ZK proofs onchain)
+    // ------------------------------------------------------------------------
+
+    function mpCommitmentFor(
+        bytes32 promptHash,
+        bytes32 policyHash,
+        bytes32 salt,
+        address receiver,
+        uint256 nonce
+    ) external pure returns (bytes32) {
+        if (promptHash == bytes32(0) || policyHash == bytes32(0) || salt == bytes32(0)) revert MP__ZeroHash();
+        if (receiver == address(0)) revert MP__BadAddress();
+        return keccak256(abi.encodePacked(bytes1(0x4d), promptHash, policyHash, salt, receiver, nonce));
+    }

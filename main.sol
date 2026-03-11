@@ -957,3 +957,140 @@ contract Mumble_Protocol is
             }
         }
 
+        _mpRevealed.set(mumbleId);
+        emit MP_RevealPublished(mumbleId, revealHash, msg.sender, at);
+    }
+
+    // ------------------------------------------------------------------------
+    // Escrow expiry reclaim (no executor: after deadline + escrow window)
+    // ------------------------------------------------------------------------
+
+    function mpReclaimExpiredEscrow(uint256 mumbleId) external mpWhenNotPaused mpNonReentrant {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.cancelled) revert MP__BadState();
+        if (m.executor != address(0)) revert MP__BadState();
+        if (block.timestamp <= m.deadline) revert MP__TooEarly();
+        if (block.timestamp <= uint256(m.deadline) + _mpEscrowWindow) revert MP__TooEarly();
+        if (m.escrow == 0) revert MP__BadAmount();
+        uint256 amount = m.escrow;
+        m.escrow = 0;
+        _mpAccrue(m.opener, amount, keccak256(abi.encodePacked("EXPIRE", mumbleId, m.deadline)));
+        emit MP_EscrowReclaimed(mumbleId, m.opener, amount, uint64(block.timestamp));
+    }
+
+    // ------------------------------------------------------------------------
+    // Fee vault sweeping (collect dust from direct sends)
+    // ------------------------------------------------------------------------
+
+    function mpSweepToFeeVault(uint256 amount, bytes32 sweepId) external mpOnlyGuardian mpNonReentrant {
+        if (sweepId == bytes32(0)) revert MP__ZeroHash();
+        if (amount == 0) revert MP__BadAmount();
+        uint256 bal = address(this).balance;
+        if (amount > bal) amount = bal;
+        (bool ok,) = payable(mpFeeVault).call{value: amount}("");
+        if (!ok) revert MP__TransferFailed();
+        emit MP_FeeSwept(mpFeeVault, amount, sweepId, block.number);
+    }
+
+    // ------------------------------------------------------------------------
+    // Views (high-signal + many small helpers; deliberately not patterned like your others)
+    // ------------------------------------------------------------------------
+
+    function mpMumbleCount() external view returns (uint256) {
+        return _mumbles.length;
+    }
+
+    function mpExists(uint256 mumbleId) external view returns (bool) {
+        return mumbleId != 0 && mumbleId < _mumbles.length;
+    }
+
+    function mpMumble(uint256 mumbleId) external view returns (Mumble memory) {
+        return _mpGetMumble(mumbleId);
+    }
+
+    function mpOpener(uint256 mumbleId) external view returns (address) {
+        return _mpGetMumble(mumbleId).opener;
+    }
+
+    function mpCommitment(uint256 mumbleId) external view returns (bytes32) {
+        return _mpGetMumble(mumbleId).commitment;
+    }
+
+    function mpModelTag(uint256 mumbleId) external view returns (bytes32) {
+        return _mpGetMumble(mumbleId).modelTag;
+    }
+
+    function mpMaxFee(uint256 mumbleId) external view returns (uint96) {
+        return _mpGetMumble(mumbleId).maxFee;
+    }
+
+    function mpDeadline(uint256 mumbleId) external view returns (uint64) {
+        return _mpGetMumble(mumbleId).deadline;
+    }
+
+    function mpOpenedAt(uint256 mumbleId) external view returns (uint64) {
+        return _mpGetMumble(mumbleId).openedAt;
+    }
+
+    function mpEscrow(uint256 mumbleId) external view returns (uint256) {
+        return _mpGetMumble(mumbleId).escrow;
+    }
+
+    function mpExecutor(uint256 mumbleId) external view returns (address) {
+        return _mpGetMumble(mumbleId).executor;
+    }
+
+    function mpWhisperHash(uint256 mumbleId) external view returns (bytes32) {
+        return _mpGetMumble(mumbleId).whisperHash;
+    }
+
+    function mpFeeClaim(uint256 mumbleId) external view returns (uint96) {
+        return _mpGetMumble(mumbleId).feeClaim;
+    }
+
+    function mpProposedAt(uint256 mumbleId) external view returns (uint64) {
+        return _mpGetMumble(mumbleId).proposedAt;
+    }
+
+    function mpFinalized(uint256 mumbleId) external view returns (bool) {
+        return _mpGetMumble(mumbleId).finalized;
+    }
+
+    function mpCancelled(uint256 mumbleId) external view returns (bool) {
+        return _mpGetMumble(mumbleId).cancelled;
+    }
+
+    function mpChallenged(uint256 mumbleId) external view returns (bool) {
+        return _mpChallenged.get(mumbleId);
+    }
+
+    function mpRevealed(uint256 mumbleId) external view returns (bool) {
+        return _mpRevealed.get(mumbleId);
+    }
+
+    function mpOpenRate() external view returns (uint32 perEpoch, uint32 epochSeconds) {
+        RateLimit memory r = _mpOpenRate;
+        return (r.perEpoch, r.epochSeconds);
+    }
+
+    function mpWindows() external view returns (uint64 challengeWindow, uint64 revealWindow, uint64 escrowWindow) {
+        return (_mpChallengeWindow, _mpRevealWindow, _mpEscrowWindow);
+    }
+
+    function mpStats() external view returns (
+        uint256 mumbleCount,
+        uint256 contractBalance,
+        uint256 feesPaid,
+        uint256 totalCreditOutstanding,
+        bool paused_,
+        bool sealed_
+    ) {
+        mumbleCount = _mumbles.length;
+        contractBalance = address(this).balance;
+        feesPaid = mpTotalFeesPaid;
+        totalCreditOutstanding = _mpTotalCredits();
+        paused_ = mpPaused;
+        sealed_ = mpSealedFlag;
+    }
+
+    function mpDomainBytes() external view returns (bytes32 nameHash, bytes32 versionHash, bytes32 domainSeparator) {

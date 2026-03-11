@@ -546,3 +546,140 @@ contract Mumble_Protocol is
     mapping(address => uint256) public mpStake;
     mapping(address => uint256) public mpStakeNonce;
 
+    // ------------------------------------------------------------------------
+    // Constructor
+    // ------------------------------------------------------------------------
+
+    constructor()
+        MP_EIP712Domain("Mumble_Protocol", "7.0.0-hush")
+    {
+        // No user-supplied addresses; all roles bootstrap to deployer.
+        address deployer = msg.sender;
+        _mpInitOwner(deployer);
+        mpGuardian = deployer;
+        mpBootstrap = deployer;
+
+        // Fee vault deterministically derived; avoids embedded address literals.
+        mpFeeVault = address(uint160(uint256(keccak256(abi.encodePacked(
+            bytes1(0x7f),
+            MP_PROTOCOL_ID,
+            MP_RNG_SALT,
+            block.chainid,
+            deployer,
+            address(this)
+        )))));
+
+        // Windows (randomized within sane ranges)
+        _mpChallengeWindow = uint64(19 hours + 37 minutes);
+        _mpRevealWindow = uint64(2 days + 3 hours + 11 minutes);
+        _mpEscrowWindow = uint64(10 days + 7 hours + 29 minutes);
+
+        // Rate limits
+        _mpOpenRate = RateLimit({
+            perEpoch: uint32(17),
+            epochSeconds: uint32(47 minutes)
+        });
+
+        // Seed an empty first slot to make mumbleId non-zero in UIs.
+        _mumbles.push(Mumble({
+            opener: address(0),
+            maxFee: 0,
+            deadline: 0,
+            openedAt: 0,
+            commitment: bytes32(0),
+            modelTag: bytes32(0),
+            escrow: 0,
+            executor: address(0),
+            feeClaim: 0,
+            proposedAt: 0,
+            whisperHash: bytes32(0),
+            finalized: true,
+            cancelled: true
+        }));
+    }
+
+    // ------------------------------------------------------------------------
+    // Modifiers
+    // ------------------------------------------------------------------------
+
+    modifier mpOnlyGuardian() {
+        if (msg.sender != mpGuardian) revert MP__NotGuardian();
+        _;
+    }
+
+    modifier mpWhenNotSealed() {
+        if (mpSealedFlag) revert MP__Sealed();
+        _;
+    }
+
+    // ------------------------------------------------------------------------
+    // IMP_MumbleView
+    // ------------------------------------------------------------------------
+
+    function mpProtocolId() external pure returns (bytes32) {
+        return MP_PROTOCOL_ID;
+    }
+
+    function mpRevision() external pure returns (uint256) {
+        return MP_REVISION;
+    }
+
+    function mpSealed() external view returns (bool) {
+        return mpSealedFlag;
+    }
+
+    function mpGuardian() external view returns (address) {
+        return mpGuardian;
+    }
+
+    function mpFeeVault() external view returns (address) {
+        return mpFeeVault;
+    }
+
+    function mpWindowConfig() external view returns (uint64 challengeWindow, uint64 revealWindow, uint64 escrowWindow) {
+        return (_mpChallengeWindow, _mpRevealWindow, _mpEscrowWindow);
+    }
+
+    // ------------------------------------------------------------------------
+    // Governance / safety
+    // ------------------------------------------------------------------------
+
+    function mpSetGuardian(address g) external mpOnlyOwner {
+        if (g == address(0)) revert MP__BadAddress();
+        address prev = mpGuardian;
+        mpGuardian = g;
+        emit MP_GuardianSet(prev, g, block.number);
+    }
+
+    function mpSetPaused(bool v) external mpOnlyGuardian {
+        _mpSetPaused(v);
+    }
+
+    function mpCastSeal(bytes32 sealId) external mpOnlyGuardian {
+        if (sealId == bytes32(0)) revert MP__ZeroHash();
+        mpSealedFlag = true;
+        mpSealId = sealId;
+        emit MP_SealCast(msg.sender, sealId, block.number);
+    }
+
+    function mpSetWindows(uint64 challengeWindow, uint64 revealWindow, uint64 escrowWindow) external mpOnlyOwner {
+        if (challengeWindow < 1 hours || challengeWindow > 14 days) revert MP__BadWindow();
+        if (revealWindow < 1 hours || revealWindow > 30 days) revert MP__BadWindow();
+        if (escrowWindow < 1 days || escrowWindow > 365 days) revert MP__BadWindow();
+        _mpChallengeWindow = challengeWindow;
+        _mpRevealWindow = revealWindow;
+        _mpEscrowWindow = escrowWindow;
+        emit MP_WindowsSet(challengeWindow, revealWindow, escrowWindow, block.number);
+    }
+
+    function mpSetOpenRate(uint32 perEpoch, uint32 epochSeconds) external mpOnlyOwner {
+        if (perEpoch == 0) revert MP__BadAmount();
+        if (epochSeconds < 60 || epochSeconds > 7 days) revert MP__BadWindow();
+        _mpOpenRate = RateLimit({perEpoch: perEpoch, epochSeconds: epochSeconds});
+        emit MP_RateSet(perEpoch, epochSeconds, block.number);
+    }
+
+    // ------------------------------------------------------------------------
+    // Staking
+    // ------------------------------------------------------------------------
+

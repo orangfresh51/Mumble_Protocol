@@ -1642,3 +1642,140 @@ contract Mumble_Protocol is
     }
 
     function mpEarliestFinalizeAt(uint256 mumbleId) external view returns (uint64) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.executor == address(0)) return 0;
+        return uint64(uint256(m.proposedAt) + _mpChallengeWindow + 1);
+    }
+
+    function mpLatestRevealAt(uint256 mumbleId) external view returns (uint64) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        return uint64(uint256(m.openedAt) + _mpRevealWindow);
+    }
+
+    function mpEscrowReclaimAfter(uint256 mumbleId) external view returns (uint64) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        return uint64(uint256(m.deadline) + _mpEscrowWindow + 1);
+    }
+
+    function mpSimulateFinalize(uint256 mumbleId) external view returns (uint256 pay, uint256 refund, bool wouldFinalize) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.cancelled || m.finalized) return (0, 0, false);
+        if (m.executor == address(0)) return (0, 0, false);
+        if (_mpChallenged.get(mumbleId)) return (0, 0, false);
+        if (block.timestamp <= uint256(m.proposedAt) + _mpChallengeWindow) return (0, 0, false);
+        uint256 fee = uint256(m.feeClaim);
+        uint256 escrow = m.escrow;
+        pay = escrow < fee ? escrow : fee;
+        refund = escrow - pay;
+        wouldFinalize = true;
+    }
+
+    function mpEscrowHeadroom(uint256 mumbleId) external view returns (uint256) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        uint256 max = uint256(m.maxFee);
+        if (m.escrow >= max) return 0;
+        return max - m.escrow;
+    }
+
+    function mpIsOpenRateLimited(address opener) external view returns (bool limited) {
+        RateLimit memory r = _mpOpenRate;
+        uint256 epoch = uint256(block.timestamp) / uint256(r.epochSeconds);
+        return _mpOpenCount[opener][epoch] >= r.perEpoch;
+    }
+
+    function mpOpenRateKey(address opener, uint256 epoch) external pure returns (bytes32) {
+        if (opener == address(0)) revert MP__BadAddress();
+        return keccak256(abi.encodePacked(bytes1(0x6b), opener, epoch));
+    }
+
+    function mpOpenCountAt(address opener, uint256 epoch) external view returns (uint32) {
+        return _mpOpenCount[opener][epoch];
+    }
+
+    function mpOpenEpochSeconds() external view returns (uint32) {
+        return _mpOpenRate.epochSeconds;
+    }
+
+    function mpOpenPerEpoch() external view returns (uint32) {
+        return _mpOpenRate.perEpoch;
+    }
+
+    // ------------------------------------------------------------------------
+    // Batch getters (bounded)
+    // ------------------------------------------------------------------------
+
+    function mpOpenersRange(uint256 fromId, uint256 toId) external view returns (address[] memory out) {
+        if (toId > _mumbles.length) toId = _mumbles.length;
+        if (fromId >= toId) return new address[](0);
+        uint256 n = toId - fromId;
+        if (n > MP_MAX_BATCH) revert MP__TooLarge();
+        out = new address[](n);
+        for (uint256 i = 0; i < n; i++) out[i] = _mumbles[fromId + i].opener;
+    }
+
+    function mpExecutorsRange(uint256 fromId, uint256 toId) external view returns (address[] memory out) {
+        if (toId > _mumbles.length) toId = _mumbles.length;
+        if (fromId >= toId) return new address[](0);
+        uint256 n = toId - fromId;
+        if (n > MP_MAX_BATCH) revert MP__TooLarge();
+        out = new address[](n);
+        for (uint256 i = 0; i < n; i++) out[i] = _mumbles[fromId + i].executor;
+    }
+
+    function mpModelTagsRange(uint256 fromId, uint256 toId) external view returns (bytes32[] memory out) {
+        if (toId > _mumbles.length) toId = _mumbles.length;
+        if (fromId >= toId) return new bytes32[](0);
+        uint256 n = toId - fromId;
+        if (n > MP_MAX_BATCH) revert MP__TooLarge();
+        out = new bytes32[](n);
+        for (uint256 i = 0; i < n; i++) out[i] = _mumbles[fromId + i].modelTag;
+    }
+
+    function mpDeadlinesRange(uint256 fromId, uint256 toId) external view returns (uint64[] memory out) {
+        if (toId > _mumbles.length) toId = _mumbles.length;
+        if (fromId >= toId) return new uint64[](0);
+        uint256 n = toId - fromId;
+        if (n > MP_MAX_BATCH) revert MP__TooLarge();
+        out = new uint64[](n);
+        for (uint256 i = 0; i < n; i++) out[i] = _mumbles[fromId + i].deadline;
+    }
+
+    function mpOpenedAtRange(uint256 fromId, uint256 toId) external view returns (uint64[] memory out) {
+        if (toId > _mumbles.length) toId = _mumbles.length;
+        if (fromId >= toId) return new uint64[](0);
+        uint256 n = toId - fromId;
+        if (n > MP_MAX_BATCH) revert MP__TooLarge();
+        out = new uint64[](n);
+        for (uint256 i = 0; i < n; i++) out[i] = _mumbles[fromId + i].openedAt;
+    }
+
+    function mpProposedAtRange(uint256 fromId, uint256 toId) external view returns (uint64[] memory out) {
+        if (toId > _mumbles.length) toId = _mumbles.length;
+        if (fromId >= toId) return new uint64[](0);
+        uint256 n = toId - fromId;
+        if (n > MP_MAX_BATCH) revert MP__TooLarge();
+        out = new uint64[](n);
+        for (uint256 i = 0; i < n; i++) out[i] = _mumbles[fromId + i].proposedAt;
+    }
+
+    function mpMaxFeesRange(uint256 fromId, uint256 toId) external view returns (uint96[] memory out) {
+        if (toId > _mumbles.length) toId = _mumbles.length;
+        if (fromId >= toId) return new uint96[](0);
+        uint256 n = toId - fromId;
+        if (n > MP_MAX_BATCH) revert MP__TooLarge();
+        out = new uint96[](n);
+        for (uint256 i = 0; i < n; i++) out[i] = _mumbles[fromId + i].maxFee;
+    }
+
+    function mpFeeClaimsRange(uint256 fromId, uint256 toId) external view returns (uint96[] memory out) {
+        if (toId > _mumbles.length) toId = _mumbles.length;
+        if (fromId >= toId) return new uint96[](0);
+        uint256 n = toId - fromId;
+        if (n > MP_MAX_BATCH) revert MP__TooLarge();
+        out = new uint96[](n);
+        for (uint256 i = 0; i < n; i++) out[i] = _mumbles[fromId + i].feeClaim;
+    }
+
+    function mpChallengeFlagsRange(uint256 fromId, uint256 toId) external view returns (bool[] memory out) {
+        if (toId > _mumbles.length) toId = _mumbles.length;
+        if (fromId >= toId) return new bool[](0);

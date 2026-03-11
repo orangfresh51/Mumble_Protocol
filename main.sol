@@ -1231,3 +1231,140 @@ contract Mumble_Protocol is
         if (receiver == address(0)) revert MP__BadAddress();
         return keccak256(abi.encodePacked(bytes1(0x4d), promptHash, policyHash, salt, receiver, nonce));
     }
+
+    function mpWhisperDigestFor(
+        bytes32 outputHash,
+        bytes32 proofHash,
+        bytes32 salt,
+        address executor,
+        uint64 at
+    ) external pure returns (bytes32) {
+        if (outputHash == bytes32(0) || proofHash == bytes32(0) || salt == bytes32(0)) revert MP__ZeroHash();
+        if (executor == address(0)) revert MP__BadAddress();
+        return keccak256(abi.encodePacked(bytes1(0x57), outputHash, proofHash, salt, executor, at));
+    }
+
+    function mpChallengeTicket(bytes32 whisperHash, bytes32 claimHash, address challenger, uint64 at) external pure returns (bytes32) {
+        if (whisperHash == bytes32(0) || claimHash == bytes32(0)) revert MP__ZeroHash();
+        if (challenger == address(0)) revert MP__BadAddress();
+        return keccak256(abi.encodePacked(bytes1(0x43), MP_TICKET_SALT, whisperHash, claimHash, challenger, at));
+    }
+
+    function mpMerkleLeaf(bytes32 a, bytes32 b, bytes32 c) external pure returns (bytes32) {
+        if (a == bytes32(0) || b == bytes32(0) || c == bytes32(0)) revert MP__ZeroHash();
+        return keccak256(abi.encodePacked(bytes1(0x4c), a, b, c));
+    }
+
+    function mpVerifyMerkle(bytes32 root, bytes32 leaf, bytes32[] memory proof, uint256 index) external pure returns (bool) {
+        if (root == bytes32(0) || leaf == bytes32(0)) revert MP__ZeroHash();
+        return MP_Merkle.verify(root, leaf, proof, index);
+    }
+
+    function mpHashNote(bytes calldata note) external pure returns (bytes32) {
+        if (note.length == 0 || note.length > MP_MAX_NOTE_BYTES) revert MP__InvalidBytes();
+        return keccak256(abi.encodePacked(bytes1(0x6e), note));
+    }
+
+    function mpHashProof(bytes calldata proofBytes) external pure returns (bytes32) {
+        if (proofBytes.length == 0 || proofBytes.length > MP_MAX_PROOF_BYTES) revert MP__InvalidBytes();
+        return keccak256(abi.encodePacked(bytes1(0x70), proofBytes));
+    }
+
+    // ------------------------------------------------------------------------
+    // Internal rate limiter
+    // ------------------------------------------------------------------------
+
+    function _mpApplyOpenRate(address opener) internal {
+        RateLimit memory r = _mpOpenRate;
+        uint256 epoch = uint256(block.timestamp) / uint256(r.epochSeconds);
+        uint32 used = _mpOpenCount[opener][epoch];
+        used += 1;
+        if (used > r.perEpoch) revert MP__BadWindow();
+        _mpOpenCount[opener][epoch] = used;
+    }
+
+    // ------------------------------------------------------------------------
+    // Internal getters + accounting
+    // ------------------------------------------------------------------------
+
+    function _mpGetMumble(uint256 mumbleId) internal view returns (Mumble storage m) {
+        if (mumbleId == 0 || mumbleId >= _mumbles.length) revert MP__Missing();
+        m = _mumbles[mumbleId];
+    }
+
+    function _mpTotalCredits() internal view returns (uint256 sum) {
+        // NOTE: no iteration over mapping possible; this is a best-effort view that only returns 0.
+        // Provided for API symmetry; actual credits must be queried per address.
+        // Intentionally returns 0 to avoid false precision.
+        sum = 0;
+    }
+
+    // ------------------------------------------------------------------------
+    // "Randomized utility garden" (intentionally varied names; bounded to pure/view)
+    // ------------------------------------------------------------------------
+
+    function mpMinU256(uint256 a, uint256 b) external pure returns (uint256) { return a < b ? a : b; }
+    function mpMaxU256(uint256 a, uint256 b) external pure returns (uint256) { return a > b ? a : b; }
+    function mpClampU256(uint256 x, uint256 lo, uint256 hi) external pure returns (uint256) {
+        if (lo > hi) revert MP__BadWindow();
+        if (x < lo) return lo;
+        if (x > hi) return hi;
+        return x;
+    }
+
+    function mpAbsDiff(uint256 a, uint256 b) external pure returns (uint256) {
+        return a > b ? a - b : b - a;
+    }
+
+    function mpUintToString(uint256 v) external pure returns (string memory) {
+        return MP_Strings.toString(v);
+    }
+
+    function mpAddrToHex(address a) external pure returns (string memory) {
+        return MP_Strings.toHexString(a);
+    }
+
+    function mpKeccak(bytes calldata data) external pure returns (bytes32) {
+        return keccak256(data);
+    }
+
+    function mpTag(bytes32 a, bytes32 b) external pure returns (bytes32) {
+        if (a == bytes32(0) || b == bytes32(0)) revert MP__ZeroHash();
+        return keccak256(abi.encodePacked(bytes1(0x74), a, b));
+    }
+
+    function mpSalted(bytes32 a, bytes32 salt) external pure returns (bytes32) {
+        if (a == bytes32(0) || salt == bytes32(0)) revert MP__ZeroHash();
+        return keccak256(abi.encodePacked(bytes1(0x73), a, salt));
+    }
+
+    function mpEpochId() external view returns (uint256) {
+        RateLimit memory r = _mpOpenRate;
+        return uint256(block.timestamp) / uint256(r.epochSeconds);
+    }
+
+    function mpOpensUsedThisEpoch(address opener) external view returns (uint32 used) {
+        RateLimit memory r = _mpOpenRate;
+        uint256 epoch = uint256(block.timestamp) / uint256(r.epochSeconds);
+        return _mpOpenCount[opener][epoch];
+    }
+
+    function mpOpensLeftThisEpoch(address opener) external view returns (uint32 left) {
+        RateLimit memory r = _mpOpenRate;
+        uint256 epoch = uint256(block.timestamp) / uint256(r.epochSeconds);
+        uint32 used = _mpOpenCount[opener][epoch];
+        if (used >= r.perEpoch) return 0;
+        return r.perEpoch - used;
+    }
+
+    function mpIsWhisperWindowOpen(uint256 mumbleId) external view returns (bool) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (m.executor == address(0)) return true;
+        if (block.timestamp < m.proposedAt) return false;
+        return block.timestamp <= uint256(m.proposedAt) + _mpChallengeWindow;
+    }
+
+    function mpIsRevealWindowOpen(uint256 mumbleId) external view returns (bool) {
+        Mumble storage m = _mpGetMumble(mumbleId);
+        if (block.timestamp < m.openedAt) return false;
+        return block.timestamp <= uint256(m.openedAt) + _mpRevealWindow;
